@@ -107,7 +107,7 @@ samtools sort -@ 12 -o merged.bam hiphap_mat_pat_merged.sam
 
   ```bash
   hiphap --merge --ref1 hg002v1.1.MATERNAL.fa --ref2 hg002v1.1.PATERNAL.fa \
-         --ref-merged hg002v1.1.fa asm1_alignments.cram asm2_alignments.cram
+         --ref-merged hg002v1.1.fa mat_alignments.cram pat_alignments.cram
   ```
 
 ### Comparing different reference genomes
