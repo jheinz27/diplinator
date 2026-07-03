@@ -103,7 +103,7 @@ samtools sort -@ 12 -o merged.bam hiphap_mat_pat_merged.sam
 - In merge mode the **two assemblies must have unique contig names**. The merged header concatenates the two inputs `@SQ` lists, so any contig name shared between them is ambiguous 
 - In merge mode HipHap writes only the merged file; the per-haplotype `hiphap_{s1}.*` / `hiphap_{s2}.*` files are not produced.
 - `--merge` cannot be combined with `--both`.
-- For **CRAM** inputs, merged output is also CRAM and requires a single combined reference (`--ref-merged <FILE>`) containing all contigs of both haplotypes — typically the original un-split diploid assembly:
+- For **CRAM** inputs, merged output is also CRAM and requires a single combined reference (`--ref-merged <FILE>`) containing all contigs of both haplotypes, typically the original diploid assembly:
 
   ```bash
   hiphap --merge --ref1 hg002v1.1.MATERNAL.fa --ref2 hg002v1.1.PATERNAL.fa \
