@@ -51,7 +51,7 @@ Options:
   -V, --version            Print version
 ```
 
-Each output record is annotated with an `hq:i:` tag carrying the HAPQ score (see [HAPQ](#hapq-haplotype-assignment-quality)), unless `--no-hapq` is set.
+Each output record is annotated with an `hq:i:` tag carrying the HapQ score, unless `--no-hapq` is set.
 
 The per-base match score used by the HAPQ calculation is auto-estimated from the `ms:i:` tags of the input files. Pass `-A`/`--match-sc <FLOAT>` to set it explicitly (e.g. `2.0` for minimap2 long-read defaults).
 
