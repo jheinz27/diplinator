@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
-rust-htslib = "0.46.0"
+rust-htslib = "0.47"
 twox-hash = "1.6"
 flate2 = "1"
 rand = "0.8"
