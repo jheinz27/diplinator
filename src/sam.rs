@@ -466,11 +466,12 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
     //store all read intervals mapping anywhere to take union of later (filter out overlapping segments)
     let mut read_intervals: Vec<(u32, u32)> = Vec::with_capacity(cur_clust.len());
 
-    //get full read length from the first non-secondary record's CIGAR
+    //get full read length from the first non-secondary, mapped record's CIGAR
     //sum of all query-consuming ops (M/I/=/X/S/H) gives original read length even for supplementaries
+    //(an unmapped record, e.g. one mate of a pair, has no CIGAR to read a length from)
     let mut read_len: u32 = 0;
     for rec in cur_clust.iter() {
-        if !rec.is_secondary() {
+        if !rec.is_secondary() && !rec.is_unmapped() {
             read_len = get_read_len(rec);
             break;
         }
@@ -480,6 +481,10 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
         //do not factor secondary alignments into choosing best alignment,
         // but still output them with the cluster, we don't want to lose them
         if rec.is_secondary() {continue};
+        //do not factor in unmapped segments either (e.g. one mate of a pair mapped while
+        //the other didn't) — they have no alignment score/length to contribute, and reading
+        //an AS/ms tag off them would fail since they were never aligned
+        if rec.is_unmapped() {continue};
 
         n_splits += 1;
 
@@ -535,7 +540,15 @@ fn compare_clusters<'a>(clust1:&'a mut Vec<Record>, clust2:&'a mut Vec<Record>, 
     }
 
     //check if read is unmapped in either or both files
-    let unmappeds = (clust1[0].is_unmapped(), clust2[0].is_unmapped());
+    //NB: check every record, not just the first — a paired-end cluster can hold a mix of
+    //mapped/unmapped segments (e.g. one mate maps, the other doesn't), unlike the single-end
+    //long-read clusters this logic was originally designed around, where index 0's status was
+    //always representative of the whole cluster. A cluster only counts as unmapped here if
+    //every record in it is unmapped.
+    let unmappeds = (
+        clust1.iter().all(|r| r.is_unmapped()),
+        clust2.iter().all(|r| r.is_unmapped()),
+    );
 
     //handle unmapped read cases
 
