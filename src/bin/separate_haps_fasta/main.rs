@@ -1,5 +1,5 @@
 use clap::Parser;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs::File;
@@ -129,7 +129,7 @@ fn main() {
     // Open reader with gzip detection
     let file = File::open(input_path).expect("Failed to open input FASTA");
     let reader: Box<dyn BufRead> = if is_gzipped {
-        Box::new(BufReader::new(GzDecoder::new(file)))
+        Box::new(BufReader::new(MultiGzDecoder::new(file)))
     } else {
         Box::new(BufReader::new(file))
     };

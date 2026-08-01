@@ -69,4 +69,38 @@ pub fn merge_intervals(intervals: &mut [(u32, u32)]) -> u32 {
     }
     read_bps_aligned
 }
+
+//print end of run summary statistics to stderr, shared by the SAM and PAF paths
+//counts and bases are both reported per category since read counts alone can mislead:
+//a category can be inflated by many very short reads
+//order of both arrays is [asm1, asm2, equal, unmapped]
+pub fn print_summary(s1: &str, s2: &str, counts: [u64; 4], bases: [u64; 4]) {
+    let total: u64 = counts.iter().sum();
+    let total_bases: u64 = bases.iter().sum();
+    //avoid NaN% when nothing was parsed (e.g. empty inputs)
+    let pct = |n: u64, denom: u64| if denom == 0 { 0.0 } else { n as f64 / denom as f64 * 100.0 };
+
+    //build labels up front so the number columns line up for any sample name length
+    let labels = [
+        format!("Reads aligned better to {}:", s1),
+        format!("Reads aligned better to {}:", s2),
+        "Reads with equal scores:".to_string(),
+        "Reads unmapped to both:".to_string(),
+        "Total reads parsed:".to_string(),
+    ];
+    let lw = labels.iter().map(|l| l.len()).max().unwrap_or(0);
+    //report bases as gigabases, keeping every digit: integer division for the whole part
+    //and the remainder as the 9 decimal places, so no rounding or float error is introduced
+    let gbp = |n: u64| format!("{}.{:09}", n / 1_000_000_000, n % 1_000_000_000);
+    //widths of the read count and gigabase columns
+    let cw = total.to_string().len();
+    let bw = gbp(total_bases).len();
+
+    for (i, label) in labels.iter().take(4).enumerate() {
+        eprintln!("{:<lw$} {:>cw$} reads ({:>4.1}%) ; {:>bw$} Gbps ({:>4.1}%)",
+            label, counts[i], pct(counts[i], total), gbp(bases[i]), pct(bases[i], total_bases));
+    }
+    //pad where the percentages would be so the totals line up with the rows above
+    eprintln!("{:<lw$} {:>cw$} reads          ; {:>bw$} Gbps", labels[4], total, gbp(total_bases));
+}
  

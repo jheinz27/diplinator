@@ -214,6 +214,13 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut count_equal: u64 = 0;
     let mut count_unmapped: u64 = 0;
 
+    //initialize summed read lengths (bases) per category
+    //read counts alone can mislead since short reads count the same as long ones
+    let mut bases_asm1: u64 = 0;
+    let mut bases_asm2: u64 = 0;
+    let mut bases_equal: u64 = 0;
+    let mut bases_unmapped: u64 = 0;
+
     //iterate through both files until they are both exhausted
     while asm1_iter.peek().is_some() || asm2_iter.peek().is_some() {
 
@@ -241,6 +248,10 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        //full read length for the base level summary statistics
+        //both clusters are the same read, so take the best informed of the two estimates
+        let read_bases = cluster_qlen(&cluster_asm1).max(cluster_qlen(&cluster_asm2));
+
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
         let (winner, hapq) = compare_clusters(&cluster_asm1, &cluster_asm2, args, resolved_match_sc)?;
 
@@ -256,16 +267,19 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             //asm1 clear winner, write to the asm1 output
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
+                bases_asm1 += read_bases;
                 write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
             }
             //asm2 clear winner, write to the asm2 output (or merged writer)
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
+                bases_asm2 += read_bases;
                 let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
                 write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
             }
             crate::Winner::Both => {
                 count_equal += 1; // increment read counter
+                bases_equal += read_bases;
                 //if user specifies --both, write equal scoring reads to both output files
                 //--both is rejected together with --merge
                 if args.both {
@@ -290,6 +304,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
+                bases_unmapped += read_bases;
                 //--unmapped selects which input's records to emit (hapq is None, so no hq tag, no span)
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
@@ -315,14 +330,11 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     //print summary statistics to terminal
-    let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
-    //avoid NaN% when no reads were parsed (e.g. empty inputs)
-    let pct = |n: u64| if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 };
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, pct(count_asm1));
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, pct(count_asm2));
-    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, pct(count_equal));
-    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, pct(count_unmapped));
-    eprintln!("Total reads parsed:          {}", total);
+    crate::print_summary(
+        &args.s1, &args.s2,
+        [count_asm1, count_asm2, count_equal, count_unmapped],
+        [bases_asm1, bases_asm2, bases_equal, bases_unmapped],
+    );
     Ok(())
 }
 
@@ -383,6 +395,16 @@ where
 }
 
 
+//helper function to get the query length (PAF field 2) of a cluster of alignments
+//the field is present on unmapped (--paf-no-hit) lines too, so it works for every cluster
+//used for summary statistics only, so a malformed field contributes 0 rather than aborting the run
+fn cluster_qlen(cluster: &[String]) -> u64 {
+    cluster.first()
+        .and_then(|line| line.split('\t').nth(1))
+        .and_then(|qlen| qlen.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 //helper function to get weighted score of split reads using a specified tag (AS or ms)
 //weighted_score = (SUM(score) / SUM(Alignment_len)) * tot read_bps_aligned
 pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<(f32, u32), Box<dyn std::error::Error>> {
@@ -391,10 +413,12 @@ pub fn get_weighted_score(cur_clust : &Vec<String>, tag_prefix: &str) -> Result<
     let mut n_splits: u32 = 0;
     let mut read_intervals: Vec<(u32, u32)> = Vec::with_capacity(cur_clust.len());
 
-    //get read length from PAF field 1 (query length) of the first record
-    let read_len: u32 = cur_clust[0].split('\t').nth(1)
-        .ok_or("Malformed PAF line: missing qlen field")?
-        .parse().map_err(|e| format!("Invalid qlen in PAF: {}", e))?;
+    //get read length from PAF field 2 (query length) of the first record
+    let read_len = cluster_qlen(cur_clust) as u32;
+    if read_len == 0 {
+        return Err(format!("Malformed PAF: missing or invalid qlen for read '{}'",
+            cur_clust[0].split('\t').next().unwrap_or("unknown")).into());
+    }
 
     for alignment in cur_clust {
         let mut fields = alignment.split('\t');

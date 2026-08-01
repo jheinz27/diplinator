@@ -300,6 +300,13 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut count_equal: u64 = 0;
     let mut count_unmapped: u64 = 0;
 
+    //initialize summed read lengths (bases) per category
+    //read counts alone can mislead since short reads count the same as long ones
+    let mut bases_asm1: u64 = 0;
+    let mut bases_asm2: u64 = 0;
+    let mut bases_equal: u64 = 0;
+    let mut bases_unmapped: u64 = 0;
+
     //iterate thorugh both files until they are both fully exhaused
     while asm1_iter.peek().is_some() || asm2_iter.peek().is_some() {
 
@@ -328,6 +335,10 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        //full read length for the base level summary statistics
+        //both clusters are the same read, must check both incase unmapped in one asm
+        let read_bases = cluster_read_len(&cluster_asm1).max(cluster_read_len(&cluster_asm2));
+
         //get cluster with the higher alignment score, returns the Winner enum and HAPQ
         let (winner, hapq) = compare_clusters(&mut cluster_asm1, &mut cluster_asm2, args, resolved_match_sc)?;
 
@@ -336,17 +347,20 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             //asm1 clear winner, write to the asm1 output
             crate::Winner::Asm1 => {
                 count_asm1 += 1;
+                bases_asm1 += read_bases;
                 write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
             }
             //asm2 clear winner, write to the asm2 output (or merged writer with offset)
             crate::Winner::Asm2 => {
-                count_asm2 += 1; 
+                count_asm2 += 1;
+                bases_asm2 += read_bases;
                  //in merge mode out_asm2 is None: asm2 records go to out_asm1 (the merged writer)
                 let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
                 write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
             }
             crate::Winner::Both => {
                 count_equal += 1;
+                bases_equal += read_bases;
                 //if user specifies --both, write equal scoring reads to both output files
                 //(--both is rejected together with --merge)
                 if args.both {
@@ -370,6 +384,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
+                bases_unmapped += read_bases;
                 //hapq is None for unmapped reads, so no hq tag is added and no span record is emitted
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
@@ -391,14 +406,11 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     //print summarry statistics to terminal
-    let total = count_asm1 + count_asm2 + count_equal + count_unmapped;
-    //avoid NaN% when no reads were parsed (e.g. empty inputs)
-    let pct = |n: u64| if total == 0 { 0.0 } else { n as f64 / total as f64 * 100.0 };
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s1, count_asm1, pct(count_asm1));
-    eprintln!("Reads aligned better to {}: {} ({:.1}%)", args.s2, count_asm2, pct(count_asm2));
-    eprintln!("Reads with equal scores:     {} ({:.1}%)", count_equal, pct(count_equal));
-    eprintln!("Reads unmapped to both:      {} ({:.1}%)", count_unmapped, pct(count_unmapped));
-    eprintln!("Total reads parsed:                 {}", total);
+    crate::print_summary(
+        &args.s1, &args.s2,
+        [count_asm1, count_asm2, count_equal, count_unmapped],
+        [bases_asm1, bases_asm2, bases_equal, bases_unmapped],
+    );
 Ok(())
 }
 
@@ -468,13 +480,7 @@ fn get_weighted_score(cur_clust : &mut Vec<Record>, tag: &[u8]) -> Result<(f32, 
 
     //get full read length from the first non-secondary record's CIGAR
     //sum of all query-consuming ops (M/I/=/X/S/H) gives original read length even for supplementaries
-    let mut read_len: u32 = 0;
-    for rec in cur_clust.iter() {
-        if !rec.is_secondary() {
-            read_len = get_read_len(rec);
-            break;
-        }
-    }
+    let read_len: u32 = cluster_read_len(cur_clust) as u32;
 
     for rec in cur_clust {
         //do not factor secondary alignments into choosing best alignment,
@@ -582,6 +588,21 @@ fn get_read_len(rec: &Record) -> u32 {
         }
     }
     rlen
+}
+
+//function to get the full read length for a whole cluster of alignments
+//check the CIGAR of the first non-secondary record, which recovers the full length
+//even for hard clipped supplementary records
+//unmapped records have no CIGAR, so fall back to the length of the SEQ field
+fn cluster_read_len(cluster: &[Record]) -> u64 {
+    for rec in cluster.iter() {
+        if !rec.is_secondary() {
+            let rlen = get_read_len(rec);
+            if rlen > 0 { return rlen as u64; }
+            return rec.seq_len() as u64;
+        }
+    }
+    0
 }
 
 //function to get query span of aligned seqment
