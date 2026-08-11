@@ -25,16 +25,20 @@ pub struct Cli {
     #[arg(long, default_value_t = false, help = "use ms:i: tag rather than AS:i: for alignment score")]
     pub ms: bool,
 
-    // write tied reads to both output files
-    #[arg(short, long, default_value_t = false, help = "write reads with equal alignment scores to both output files")]
+    // write tied reads to both output files (requires -p: two primaries cannot share one file)
+    #[arg(short, long, default_value_t = false, help = "write reads with equal alignment scores to both output files (requires -p)")]
     pub both: bool,
 
-    // write a single merged output file rather than one file per haplotype
-    #[arg(short = 'm', long, default_value_t = false, help = "write a single merged output file (hiphap_{s1}_{s2}_merged.*) instead of one file per haplotype")]
-    pub merge: bool,
+    // write one file per haplotype rather than a single merged output file (merged is the default)
+    #[arg(short = 'p', long, default_value_t = false, help = "write one file per haplotype instead of a single merged output file")]
+    pub partition: bool,
+
+    // output path: the merged file name, or the shared stem for the pair under --partition
+    #[arg(short = 'o', long, value_name = "FILE", help = "output file [default: hiphap_{s1}_{s2}_merged.*]; with -p this is the stem for {out}_{s1}.* and {out}_{s2}.*")]
+    pub output: Option<String>,
 
     // combined reference FASTA for writing a merged CRAM (must contain all contigs of both haplotypes)
-    #[arg(long, value_name = "FILE", required = false, help = "combined reference FASTA for merged CRAM output (must contain all contigs of both inputs); required with --merge on CRAM input")]
+    #[arg(long, value_name = "FILE", required = false, help = "combined reference FASTA for merged CRAM output (must contain all contigs of both inputs); required for merged CRAM output")]
     pub ref_merged: Option<String>,
 
     // where to write reads unmapped in both assemblies
@@ -56,12 +60,22 @@ pub struct Cli {
     pub no_hapq: bool,
 
     // disable writing the list of chromosome-spanning reads
-    #[arg(long, default_value_t = false, help = "disable writing hiphap_{s1}_{s2}_span_chrom.fastq")]
+    #[arg(long, default_value_t = false, help = "disable writing the chromosome-spanning reads file (*_span_chrom.fastq, or .txt for PAF)")]
     pub no_span_chrom: bool,
 
-    // number of total threads to use
-    #[arg(short, long,value_name = "INT", default_value_t = 8, help = "Total thread pool size (min 4). Multiples of 8 recommended for optimal read/write balance.")]
-    pub threads: usize
+    // number of total threads to use; the default follows the mode, so resolve it with
+    // Cli::resolved_threads() rather than reading this field directly
+    #[arg(short, long,value_name = "INT", help = "total thread pool size [default: 5; 8 with -p]. Each writer gets 3x a reader for BAM/CRAM output and 1x for SAM")]
+    pub threads: Option<usize>
+}
+
+impl Cli {
+    //the thread budget, defaulting to the smallest one that fits the mode at the intended
+    //write:read ratio: merged runs 2 readers + 1 writer (2 + 3 = 5), -p runs 2 readers +
+    //2 writers (2 + 3 + 3 = 8). See plan_threads for how the budget is then divided.
+    pub fn resolved_threads(&self) -> usize {
+        self.threads.unwrap_or(if self.partition { 8 } else { 5 })
+    }
 }
 
 #[derive(Debug, Clone, ValueEnum)]

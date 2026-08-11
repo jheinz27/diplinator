@@ -147,9 +147,13 @@ fn paf_get_chrom(rec: &str) -> Option<&str> {
 pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     //--both would write a read's alignments to the merged file twice; reject the combination
-    if args.merge && args.both {
-        return Err("--both cannot be combined with --merge".into());
+    //(same wording as the SAM backend so the two stay in step)
+    if !args.partition && args.both {
+        return Err("--both requires -p/--partition (in a merged file a read would get two primary records)".into());
     }
+    //the output format follows the input, so flag an -o extension that says otherwise
+    //(--ref-merged is already warned about as PAF-irrelevant in main.rs)
+    crate::warn_output_ext_mismatch(args, ".paf");
 
     //resolve match score: user override takes precedence, else auto-estimate from both PAFs
     let resolved_match_sc: f32 = if args.no_hapq {
@@ -178,24 +182,21 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut asm1_iter = BufReader::new(file1).lines().peekable();
     let mut asm2_iter = BufReader::new(file2).lines().peekable();
 
-    //create output writer(s): a single merged file with --merge (out_asm2 = None), else one per haplotype.
-    let asm1_out_path = if args.merge {
-        format!("hiphap_{}_{}_merged.paf", args.s1, args.s2)
-    } else {
-        format!("hiphap_{}.paf", args.s1)
-    };
+    //resolve every output path up front (shared with the SAM backend)
+    let (asm1_out_path, asm2_out_path, span_path) =
+        crate::output_paths(args, ".paf", ".txt");
+
+    //create output writer(s): a single merged file by default (out_asm2 = None), one per
+    //haplotype under -p
     let mut out_asm1 = BufWriter::new(File::create(&asm1_out_path)
         .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?);
-    let mut out_asm2: Option<BufWriter<File>> = if args.merge {
-        None
-    } else {
-        let asm2_out_path = format!("hiphap_{}.paf", args.s2);
-        Some(BufWriter::new(File::create(&asm2_out_path)
-            .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?))
+    let mut out_asm2: Option<BufWriter<File>> = match &asm2_out_path {
+        None => None,
+        Some(p) => Some(BufWriter::new(File::create(p)
+            .map_err(|e| format!("Failed to create output file '{}': {}", p, e))?)),
     };
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
-    let span_path = format!("hiphap_{}_{}_span_chrom.txt", args.s1, args.s2);
     let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
         None
     } else {
@@ -281,7 +282,7 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 count_equal += 1; // increment read counter
                 bases_equal += read_bases;
                 //if user specifies --both, write equal scoring reads to both output files
-                //--both is rejected together with --merge
+                //--both requires -p, so out_asm2 is always Some here
                 if args.both {
                     write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
                     let w2 = out_asm2.as_mut().expect("internal error: --both requires partitioned mode");
@@ -323,7 +324,9 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     //flush all writers
     out_asm1.flush().map_err(|e| format!("Failed to flush '{}': {}", asm1_out_path, e))?;
     if let Some(w) = out_asm2.as_mut() {
-        w.flush().map_err(|e| format!("Failed to flush output: {}", e))?;
+        //asm2_out_path is in scope now, so the error can name the file
+        let p = asm2_out_path.as_deref().unwrap_or("asm2 output");
+        w.flush().map_err(|e| format!("Failed to flush '{}': {}", p, e))?;
     }
     if let Some(w) = span_writer.as_mut() {
         w.flush().map_err(|e| format!("Failed to flush '{}': {}", span_path, e))?;

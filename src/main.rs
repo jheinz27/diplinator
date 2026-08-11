@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
     }
 
     if args.paf {
-        if args.threads != 8 {
+        if args.threads.is_some() {
             eprintln!("Warning: --threads is ignored in PAF mode");
         }
         if args.ref1.is_some() || args.ref2.is_some() || args.ref_merged.is_some() {

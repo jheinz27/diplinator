@@ -21,12 +21,13 @@ use crate::cli::Cli;
 // Samples ~1 in 10,000 primary alignments until 10 reads are sampledd
 // returns ceiling of the maximum ms / alignment_length as -A estimate
 //claude implemented (checked )
-pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>) -> Result<i32, Box<dyn std::error::Error>> {
+pub fn estimate_minimap2_a(bam_path: &str, reference: Option<&str>, threads: usize) -> Result<i32, Box<dyn std::error::Error>> {
     let mut reader = bam::Reader::from_path(bam_path)
         .map_err(|e| format!("Failed to open '{}' for -A estimation: {}. Set -A/--match_sc explicitly.", bam_path, e))?;
 
-    //use min required number of threads 
-    reader.set_threads(4)
+    //the two estimation passes run one after another before any other reader or writer exists,
+    //so this decoder can use the whole budget rather than a hardcoded share of it
+    reader.set_threads(max(1, threads))
         .map_err(|e| format!("Failed to set threads for -A estimation on '{}': {}", bam_path, e))?;
 
     //if reference provided (CRAM), apply it
@@ -148,8 +149,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     //number of @SQ entries in asm1; in a merged header asm2's contigs are appended after these,
     let n1 = asm1_hdr.target_count() as i32;
-    //offset applied to asm2 reference ids when writing (n1 in merge mode, 0 in partitioned mode)
-    let asm2_offset = if args.merge { n1 } else { 0 };
+    //offset applied to asm2 reference ids when writing (n1 when merging, 0 with -p)
+    let asm2_offset = if args.partition { 0 } else { n1 };
 
     //get proper file extension for output based on input format
     //previos checked that fommats were the same between files
@@ -158,18 +159,21 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         bam::Format::Sam => ".sam",
         bam::Format::Cram => ".cram",
     };
+    //the output format follows the input, so flag an -o extension that says otherwise
+    crate::warn_output_ext_mismatch(args, extension);
 
-    //--merge mode validation
-    if args.merge {
+    //merged mode validation (merged is the default; -p writes one file per haplotype)
+    if !args.partition {
         //--both would put two primary records for one read in a single file, throw error
         if args.both {
-            return Err("--both cannot be combined with --merge (a read would get two primary records in one file)".into());
+            return Err("--both requires -p/--partition (in a merged file a read would get two primary records)".into());
         }
         //the merged header concatenates the @SQ lists, so contig names must be different between assemblies
         let names1: HashSet<&[u8]> = asm1_names.iter().copied().collect();
         if let Some(dup) = asm2_names.iter().find(|n| names1.contains(*n)) {
             return Err(format!(
-                "--merge requires unique contig names between the two inputs, but '{}' appears in both",
+                "merged output requires unique contig names between the two inputs, but '{}' appears in both. \
+                 Pass -p/--partition to write one file per haplotype instead",
                 String::from_utf8_lossy(dup)
             ).into());
         }
@@ -180,7 +184,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else if args.ref_merged.is_some() {
-        eprintln!("Warning: --ref-merged is ignored without --merge");
+        eprintln!("Warning: --ref-merged is ignored with -p/--partition");
     }
 
     //make command line for the @PG tag space seperated
@@ -189,25 +193,29 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>()
         .join(" ");
 
+    //resolve every output path up front (shared with the PAF backend)
+    let (primary_path, secondary_path, span_path) =
+        crate::output_paths(args, extension, ".fastq");
+
     //create output writers
-    let (mut out_asm1, mut out_asm2): (Writer, Option<Writer>) = if args.merge {
-        //in merge mode, out_asm1 is the single merged writer and out_asm2 is None;
-        let merged_header = build_merged_header(&asm1_hdr, &asm2_hdr, &hiphap_cl);
-        let merged_path = format!("hiphap_{}_{}_merged{}", args.s1, args.s2, extension);
-        let w = Writer::from_path(&merged_path, &merged_header, asm1_format)
-            .map_err(|e| format!("Failed to create output file '{}': {}", merged_path, e))?;
-        (w, None)
-    } else {
-        //in partitioned mode, out_asm1/out_asm2 are the per-haplotype writers, copy input headers
-        let header_asm1 = header_with_pg(&asm1_hdr, &hiphap_cl);
-        let header_asm2 = header_with_pg(&asm2_hdr, &hiphap_cl);
-        let asm1_out_path = format!("hiphap_{}{}", args.s1, extension);
-        let asm2_out_path = format!("hiphap_{}{}", args.s2, extension);
-        let w1 = Writer::from_path(&asm1_out_path, &header_asm1, asm1_format)
-            .map_err(|e| format!("Failed to create output file '{}': {}", asm1_out_path, e))?;
-        let w2 = Writer::from_path(&asm2_out_path, &header_asm2, asm2_format)
-            .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
-        (w1, Some(w2))
+    let (mut out_asm1, mut out_asm2): (Writer, Option<Writer>) = match &secondary_path {
+        //merged: out_asm1 is the single merged writer and out_asm2 is None
+        None => {
+            let merged_header = build_merged_header(&asm1_hdr, &asm2_hdr, &hiphap_cl);
+            let w = Writer::from_path(&primary_path, &merged_header, asm1_format)
+                .map_err(|e| format!("Failed to create output file '{}': {}", primary_path, e))?;
+            (w, None)
+        }
+        //partitioned: out_asm1/out_asm2 are the per-haplotype writers, copy input headers
+        Some(asm2_out_path) => {
+            let header_asm1 = header_with_pg(&asm1_hdr, &hiphap_cl);
+            let header_asm2 = header_with_pg(&asm2_hdr, &hiphap_cl);
+            let w1 = Writer::from_path(&primary_path, &header_asm1, asm1_format)
+                .map_err(|e| format!("Failed to create output file '{}': {}", primary_path, e))?;
+            let w2 = Writer::from_path(asm2_out_path, &header_asm2, asm2_format)
+                .map_err(|e| format!("Failed to create output file '{}': {}", asm2_out_path, e))?;
+            (w1, Some(w2))
+        }
     };
 
     // set cram reference for readers and writers if cram input 
@@ -222,8 +230,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         asm2_reader.set_reference(r2)
             .map_err(|e| format!("Failed to set reference for asm2 Reader: {}", e))?;
 
-        //set to diploid reference writer if --merge setting 
-        if args.merge {
+        //set to diploid reference writer when merging (validated above, so unwrap is sound)
+        if !args.partition {
             let rm = args.ref_merged.as_deref().unwrap();
             out_asm1.set_reference(rm)
                 .map_err(|e| format!("Failed to set reference for merged Writer: {}", e))?;
@@ -247,8 +255,8 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         match args.match_sc {
             Some(v) => v,
             None => {
-                let a1 = estimate_minimap2_a(&args.asm1, args.ref1.as_deref())?;
-                let a2 = estimate_minimap2_a(&args.asm2, args.ref2.as_deref())?;
+                let a1 = estimate_minimap2_a(&args.asm1, args.ref1.as_deref(), args.resolved_threads())?;
+                let a2 = estimate_minimap2_a(&args.asm2, args.ref2.as_deref(), args.resolved_threads())?;
                 let est = a1.max(a2);
                 eprintln!("Auto-estimated minimap2 -A (--match-score) from files: asm1={}, asm2={}, using={}", a1, a2, est);
                 est as f32
@@ -257,7 +265,6 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     //open side writer for reads whose winning cluster spans multiple chromosomes (unless disabled)
-    let span_path = format!("hiphap_{}_{}_span_chrom.fastq", args.s1, args.s2);
     let mut span_writer: Option<BufWriter<File>> = if args.no_span_chrom {
         None
     } else {
@@ -265,24 +272,21 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
     };
 
-    //set threads
-    //if user specifies less than 4, set to 4 (1 thread for each reader and each writer is needed)
-    let avail_threads = max(4, args.threads);
-    //assign write:reader threads (ideally) 3:1
-    let r = max(1, avail_threads / 8);
-    //if any additional threads available, assign to writers
-    //if num threads is odd, leave one idle
-    let w = (avail_threads - (2 * r)) / 2;
+    //set threads: a writer is weighted 3x a reader for compressed output, 1x for plain SAM text
+    let writer_weight = match asm1_format {
+        bam::Format::Sam => 1,
+        bam::Format::Bam | bam::Format::Cram => 3,
+    };
+    //one writer when merging, one per haplotype with -p; always two readers
+    let n_writers = if out_asm2.is_some() { 2 } else { 1 };
+    let plan = crate::plan_threads(args.resolved_threads(), 2, n_writers, writer_weight);
 
-    //assign threads to each reader/writer pair
-    asm1_reader.set_threads(r)?;
-    asm2_reader.set_threads(r)?;
+    //assign threads to each reader and writer
+    asm1_reader.set_threads(plan.reader)?;
+    asm2_reader.set_threads(plan.reader)?;
+    out_asm1.set_threads(plan.writer)?;
     if let Some(out2) = out_asm2.as_mut() {
-        out_asm1.set_threads(w)?;
-        out2.set_threads(w)?;
-    } else {
-        //single merged writer gets the full writer thread budget
-        out_asm1.set_threads(2 * w)?;
+        out2.set_threads(plan.writer)?;
     }
 
     //create peakable iterators of each file
@@ -362,11 +366,12 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 count_equal += 1;
                 bases_equal += read_bases;
                 //if user specifies --both, write equal scoring reads to both output files
-                //(--both is rejected together with --merge)
+                //(--both requires -p, so asm2_offset is 0 here; pass it anyway rather than a
+                //hard-coded 0, so this stays correct if the -p requirement is ever relaxed)
                 if args.both {
                     write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
-                    let w2 = out_asm2.as_mut().expect("internal error: --both requires partitioned mode");
-                    write_winner_cluster(w2, &mut cluster_asm2, hapq, 0, &mut span_writer, &asm2_names, "asm2")?;
+                    let w2 = out_asm2.as_mut().expect("internal error: --both requires -p/--partition");
+                    write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                 //default behavior is to deterministically randomly assign each tied read to one haplotype
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
