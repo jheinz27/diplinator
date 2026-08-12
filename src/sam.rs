@@ -352,7 +352,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::Winner::Asm1 => {
                 count_asm1 += 1;
                 bases_asm1 += read_bases;
-                write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
+                write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, Some(1), 0, &mut span_writer, &asm1_names, "asm1")?;
             }
             //asm2 clear winner, write to the asm2 output (or merged writer with offset)
             crate::Winner::Asm2 => {
@@ -360,7 +360,7 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 bases_asm2 += read_bases;
                  //in merge mode out_asm2 is None: asm2 records go to out_asm1 (the merged writer)
                 let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
+                write_winner_cluster(w2, &mut cluster_asm2, hapq, Some(2), asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
             }
             crate::Winner::Both => {
                 count_equal += 1;
@@ -369,20 +369,20 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 //(--both requires -p, so asm2_offset is 0 here; pass it anyway rather than a
                 //hard-coded 0, so this stays correct if the -p requirement is ever relaxed)
                 if args.both {
-                    write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
+                    write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, Some(1), 0, &mut span_writer, &asm1_names, "asm1")?;
                     let w2 = out_asm2.as_mut().expect("internal error: --both requires -p/--partition");
-                    write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
+                    write_winner_cluster(w2, &mut cluster_asm2, hapq, Some(2), asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                 //default behavior is to deterministically randomly assign each tied read to one haplotype
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
                     //ensures that assignments will be reproducible
                     match crate::choose_random(cluster_asm1[0].qname()) {
                         crate::Winner::Asm1 => {
-                            write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
+                            write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, Some(1), 0, &mut span_writer, &asm1_names, "asm1")?;
                         }
                         _ => {
                             let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                            write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
+                            write_winner_cluster(w2, &mut cluster_asm2, hapq, Some(2), asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                         }
                     }
                 }
@@ -390,14 +390,16 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
                 bases_unmapped += read_bases;
-                //hapq is None for unmapped reads, so no hq tag is added and no span record is emitted
+                //hapq is None for unmapped reads, so no hq tag is added and no span record is emitted.
+                //no HP tag either: --unmapped only picks whose records to emit, it is not a
+                //haplotype assignment, so these reads must stay untagged
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
-                        write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, 0, &mut span_writer, &asm1_names, "asm1")?;
+                        write_winner_cluster(&mut out_asm1, &mut cluster_asm1, hapq, None, 0, &mut span_writer, &asm1_names, "asm1")?;
                     }
                     crate::cli::UnmappedDest::Asm2 => {
                         let w2: &mut Writer = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                        write_winner_cluster(w2, &mut cluster_asm2, hapq, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
+                        write_winner_cluster(w2, &mut cluster_asm2, hapq, None, asm2_offset, &mut span_writer, &asm2_names, "asm2")?;
                     }
                     crate::cli::UnmappedDest::Discard => {}
                 }
@@ -895,7 +897,7 @@ fn build_merged_header(asm1_hdr: &bam::HeaderView, asm2_hdr: &bam::HeaderView, c
 }
 
 //write every record of a winning cluster to assigned file (merged or partitioned) 
-fn write_winner_cluster(writer: &mut Writer, cluster: &mut [Record],hapq: Option<u8>,tid_offset: i32,span_writer: &mut Option<BufWriter<File>>,names: &[&[u8]],label: &str,
+fn write_winner_cluster(writer: &mut Writer, cluster: &mut [Record],hapq: Option<u8>,hp: Option<u8>,tid_offset: i32,span_writer: &mut Option<BufWriter<File>>,names: &[&[u8]],label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut seen_tids: Vec<i32> = Vec::with_capacity(4);
     let mut primary_idx: Option<usize> = None;
@@ -906,8 +908,17 @@ fn write_winner_cluster(writer: &mut Writer, cluster: &mut [Record],hapq: Option
             if !seen_tids.contains(&t) { seen_tids.push(t); }
             if !rec.is_supplementary() { primary_idx = Some(i); }
         }
-        //add hq tag to record 
-        if let Some(hq) = hapq { rec.push_aux(b"hq", Aux::U8(hq))?; }
+        //add hq (HapQ) and HP (haplotype assignment) tags to record; drop any pre-existing copy
+        //first so re-running hiphap on its own output replaces the tag rather than duplicating it
+        //(remove_aux errors when the tag is absent, which is the normal case)
+        if let Some(hq) = hapq {
+            let _ = rec.remove_aux(b"hq");
+            rec.push_aux(b"hq", Aux::U8(hq))?;
+        }
+        if let Some(h) = hp {
+            let _ = rec.remove_aux(b"HP");
+            rec.push_aux(b"HP", Aux::U8(h))?;
+        }
         //shift reference ids into the merged header tid coordinates
         if tid_offset != 0 {
             let t = rec.tid();

@@ -103,7 +103,7 @@ fn emit_span_paf(
 
 
 //write every record of a winning cluster to respective writer 
-fn write_paf_cluster(writer: &mut BufWriter<File>, cluster: &[String],hq_suffix: &str, span_writer: &mut Option<BufWriter<File>>, label: &str,) -> Result<(), Box<dyn std::error::Error>> {
+fn write_paf_cluster(writer: &mut BufWriter<File>, cluster: &[String],hq_suffix: &str, hp_suffix: &str, span_writer: &mut Option<BufWriter<File>>, label: &str,) -> Result<(), Box<dyn std::error::Error>> {
     let mut seen_chroms: Vec<String> = Vec::with_capacity(4);
     for rec in cluster.iter() {
 
@@ -114,8 +114,8 @@ fn write_paf_cluster(writer: &mut BufWriter<File>, cluster: &[String],hq_suffix:
                 }
             }
         }
-        //append hq tag
-        writeln!(writer, "{}{}", rec, hq_suffix)?;
+        //append hq (HapQ) and HP (haplotype assignment) tags
+        writeln!(writer, "{}{}{}", rec, hq_suffix, hp_suffix)?;
     }
     //if winning read is to multiple chrs, write read to txt file 
     if seen_chroms.len() > 1 {
@@ -269,14 +269,14 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::Winner::Asm1 => {
                 count_asm1 += 1; // increment read counter
                 bases_asm1 += read_bases;
-                write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
+                write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, "\tHP:i:1", &mut span_writer, "asm1")?;
             }
             //asm2 clear winner, write to the asm2 output (or merged writer)
             crate::Winner::Asm2 => {
                 count_asm2 += 1; // increment read counter
                 bases_asm2 += read_bases;
                 let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
+                write_paf_cluster(w2, &cluster_asm2, &hq_suffix, "\tHP:i:2", &mut span_writer, "asm2")?;
             }
             crate::Winner::Both => {
                 count_equal += 1; // increment read counter
@@ -284,9 +284,9 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 //if user specifies --both, write equal scoring reads to both output files
                 //--both requires -p, so out_asm2 is always Some here
                 if args.both {
-                    write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
+                    write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, "\tHP:i:1", &mut span_writer, "asm1")?;
                     let w2 = out_asm2.as_mut().expect("internal error: --both requires partitioned mode");
-                    write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
+                    write_paf_cluster(w2, &cluster_asm2, &hq_suffix, "\tHP:i:2", &mut span_writer, "asm2")?;
                 //default behavior is to deterministically assign each tied read to one haplotype
                 } else {
                     //hash read name and use last bit value to assign to asm1 or asm2
@@ -294,11 +294,11 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let qname = cluster_asm1[0].split('\t').next().unwrap().to_string();
                     match crate::choose_random(qname.as_bytes()) {
                         crate::Winner::Asm1 => {
-                            write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
+                            write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, "\tHP:i:1", &mut span_writer, "asm1")?;
                         }
                         _ => {
                             let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                            write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
+                            write_paf_cluster(w2, &cluster_asm2, &hq_suffix, "\tHP:i:2", &mut span_writer, "asm2")?;
                         }
                     }
                 }
@@ -306,14 +306,15 @@ pub fn process_paf(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::Winner::Unmapped => {
                 count_unmapped += 1;
                 bases_unmapped += read_bases;
-                //--unmapped selects which input's records to emit (hapq is None, so no hq tag, no span)
+                //--unmapped selects which input's records to emit (hapq is None, so no hq tag, no span).
+                //no HP tag either: --unmapped is not a haplotype assignment
                 match args.unmapped {
                     crate::cli::UnmappedDest::Asm1 => {
-                        write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, &mut span_writer, "asm1")?;
+                        write_paf_cluster(&mut out_asm1, &cluster_asm1, &hq_suffix, "", &mut span_writer, "asm1")?;
                     }
                     crate::cli::UnmappedDest::Asm2 => {
                         let w2 = match out_asm2 { Some(ref mut w) => w, None => &mut out_asm1 };
-                        write_paf_cluster(w2, &cluster_asm2, &hq_suffix, &mut span_writer, "asm2")?;
+                        write_paf_cluster(w2, &cluster_asm2, &hq_suffix, "", &mut span_writer, "asm2")?;
                     }
                     crate::cli::UnmappedDest::Discard => {}
                 }
