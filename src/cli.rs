@@ -65,16 +65,16 @@ pub struct Cli {
 
     // number of total threads to use; the default follows the mode, so resolve it with
     // Cli::resolved_threads() rather than reading this field directly
-    #[arg(short, long,value_name = "INT", help = "total thread pool size [default: 5; 8 with -p]. Each writer gets 3x a reader for BAM/CRAM output and 1x for SAM")]
+    #[arg(short, long,value_name = "INT", help = "total thread pool size [default: 6; 8 with -p]. For BAM/CRAM output the writer gets 4x a reader when merging and 3x with -p; 1x for SAM")]
     pub threads: Option<usize>
 }
 
 impl Cli {
     //the thread budget, defaulting to the smallest one that fits the mode at the intended
-    //write:read ratio: merged runs 2 readers + 1 writer (2 + 3 = 5), -p runs 2 readers +
+    //write:read ratio: merged runs 2 readers + 1 writer (2 + 4 = 6), -p runs 2 readers +
     //2 writers (2 + 3 + 3 = 8). See plan_threads for how the budget is then divided.
     pub fn resolved_threads(&self) -> usize {
-        self.threads.unwrap_or(if self.partition { 8 } else { 5 })
+        self.threads.unwrap_or(if self.partition { 8 } else { 6 })
     }
 }
 

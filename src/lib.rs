@@ -148,11 +148,12 @@ pub struct ThreadPlan {
 }
 
 //divide the --threads budget between the readers and the writers. A reader counts as one share
-//and a writer as writer_weight shares: 3 for BGZF/CRAM output, where compression costs roughly
-//3x the matching decompression, and 1 for uncompressed SAM text, where there is nothing to
-//compress. With two readers that makes the natural budget 2 + 3 = 5 merged and 2 + 3 + 3 = 8
-//with -p. A request too small to give every file one thread is raised silently, and a leftover
-//thread that will not divide evenly between two writers is left idle so the pair stays symmetric.
+//and a writer as writer_weight shares: for BGZF/CRAM output 4 merged and 3 per writer with -p,
+//where compression costs several times the matching decompression, and 1 for uncompressed SAM
+//text, where there is nothing to compress. With two readers that makes the natural budget
+//2 + 4 = 6 merged and 2 + 3 + 3 = 8 with -p. A request too small to give every file one thread
+//is raised silently, and a leftover thread that will not divide evenly between two writers is
+//left idle so the pair stays symmetric.
 pub fn plan_threads(
     requested: usize,
     n_readers: usize,
@@ -218,7 +219,7 @@ mod tests {
     use super::plan_threads;
 
     //the four shapes hiphap actually runs: two readers, one or two writers, compressed or not
-    const MERGED_COMPRESSED: (usize, usize) = (1, 3);
+    const MERGED_COMPRESSED: (usize, usize) = (1, 4);
     const MERGED_SAM: (usize, usize) = (1, 1);
     const PART_COMPRESSED: (usize, usize) = (2, 3);
     const PART_SAM: (usize, usize) = (2, 1);
@@ -231,8 +232,8 @@ mod tests {
 
     #[test]
     fn matches_the_default_budgets() {
-        //5 merged: one thread per reader, three for the single writer
-        assert_eq!(split(5, MERGED_COMPRESSED), (1, 3));
+        //6 merged: one thread per reader, four for the single writer
+        assert_eq!(split(6, MERGED_COMPRESSED), (1, 4));
         //8 partitioned: one thread per reader, three for each of the two writers
         assert_eq!(split(8, PART_COMPRESSED), (1, 3));
     }
@@ -251,7 +252,7 @@ mod tests {
     fn merged_compressed_table() {
         let expected = [
             (3, (1, 1)), (4, (1, 2)), (5, (1, 3)), (6, (1, 4)),
-            (8, (2, 4)), (10, (2, 6)), (16, (3, 10)), (32, (6, 20)),
+            (8, (1, 6)), (10, (2, 6)), (16, (3, 10)), (32, (5, 22)),
         ];
         for (t, want) in expected {
             assert_eq!(split(t, MERGED_COMPRESSED), want, "-t {}", t);

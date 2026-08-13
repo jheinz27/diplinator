@@ -272,13 +272,14 @@ pub fn process_sam(args: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to create '{}': {}", span_path, e))?))
     };
 
-    //set threads: a writer is weighted 3x a reader for compressed output, 1x for plain SAM text
-    let writer_weight = match asm1_format {
-        bam::Format::Sam => 1,
-        bam::Format::Bam | bam::Format::Cram => 3,
-    };
     //one writer when merging, one per haplotype with -p; always two readers
     let n_writers = if out_asm2.is_some() { 2 } else { 1 };
+    //set threads: for compressed output a writer is weighted 4x a reader when merging and 3x
+    //when partitioned; plain SAM text is 1x
+    let writer_weight = match asm1_format {
+        bam::Format::Sam => 1,
+        bam::Format::Bam | bam::Format::Cram => if n_writers == 1 { 4 } else { 3 },
+    };
     let plan = crate::plan_threads(args.resolved_threads(), 2, n_writers, writer_weight);
 
     //assign threads to each reader and writer
